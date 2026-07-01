@@ -98,4 +98,4 @@ Released under the **GPLv2** license, matching libtesla. See [LICENSE](LICENSE).
 ## Disclaimer
 
 This is homebrew software for consoles running custom firmware. Use at your own
-risk. Not affiliated with or endorsed by Nintendo.
+risk. Not affiliated with or endorsed by manufacturing company.
