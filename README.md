@@ -1,6 +1,6 @@
 # Express Config
 
-A **Tesla / Ultrahand** overlay for the Nintendo Switch (custom firmware) that gives
+A **Tesla / Ultrahand** overlay for the N Switch (custom firmware) that gives
 you quick access to **screen brightness** and **Bluetooth audio** — without ever
 opening the System Settings.
 
