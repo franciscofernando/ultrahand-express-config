@@ -1,12 +1,12 @@
 # Express Config
 
 A **Tesla / Ultrahand** overlay for the N Switch (custom firmware) that gives
-you quick access to **screen brightness** and **Bluetooth audio** — without ever
-opening the System Settings.
+you quick access to **screen brightness**, **Bluetooth audio**, **Wi‑Fi** and the
+**system clock** — without ever opening the System Settings.
 
 Put your AirPods (or any Bluetooth headphones / speaker) into pairing mode and
-connect them straight from the overlay, and slide the screen brightness from
-anywhere, even inside a game.
+connect them straight from the overlay, toggle Wi‑Fi, fix the clock, and slide the
+screen brightness from anywhere, even inside a game.
 
 ## Features
 
@@ -19,6 +19,12 @@ anywhere, even inside a game.
   - See paired devices with a live "Connected" status
   - Connect / disconnect a paired device (**A**) or forget it (**Y**)
   - Scan for and pair **new** audio devices (AirPods, headphones, speakers…)
+- **Wi‑Fi**
+  - Turn wireless communication on/off (disconnect / reconnect)
+  - Live status: current network name, connection state and signal strength (0–3 bars)
+- **Time & date**
+  - Edit year, month, day, hour and minute (Left/Right to adjust, with proper
+    month lengths and leap years) and save it to the system clock
 - **Automatic language**: the UI is shown in **Spanish** if the console language is
   Spanish (Spain or Latin America), and in **English** for every other language.
 
@@ -50,6 +56,10 @@ anywhere, even inside a game.
   - *Search headphones / speakers…* → put the device in pairing mode
     (for AirPods, hold the case button until the light blinks white) and press
     **A** on it once it appears.
+- **Wi‑Fi** – toggle *WiFi / wireless* to disconnect or reconnect. The status
+  section shows the current network and signal strength.
+- **Time & date** – highlight a field (Year / Month / Day / Hour / Minute), press
+  **Left/Right** to change it, then select *Save time & date*.
 
 ## Building from source
 
@@ -82,8 +92,19 @@ express-config/
   (`btmsysStartAudioDeviceDiscovery`, `btmsysConnectAudioDevice`,
   `btmsysGetPairedAudioDevices`, …), which exposes audio device management on
   firmware 13.0.0+.
+- **Wi‑Fi** uses the `nifm` service. Toggling wireless
+  (`nifmSetWirelessCommunicationEnabled`) requires the `nifm:a`/`nifm:s` session,
+  so the overlay initializes Admin → System → User and falls back to read‑only if
+  it only gets a `nifm:u` session.
+- **Time & date** uses the `time` service. Writing the clock
+  (`timeSetCurrentTime`) requires the `time:s` session, so the overlay requests it
+  via `__nx_time_service_type` and falls back to `time:u` (read‑only) otherwise.
 - **Language** is read once at startup via the `set` service
   (`setGetSystemLanguage`).
+
+> Some of these actions need elevated system services (`nifm:a`, `time:s`). If your
+> overlay loader doesn't grant them, those controls show as *read‑only* / *no
+> permission* instead of failing silently.
 
 ## Credits
 

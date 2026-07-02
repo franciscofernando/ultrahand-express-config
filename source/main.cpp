@@ -32,6 +32,15 @@ static inline const char *L(const char *es, const char *en) {
     return g_es ? es : en;
 }
 
+// Servicios de hora (time) y red (nifm).
+static Result g_timeRc      = 1;
+static bool   g_timeCanSet  = false;   // ¿tenemos time:s para escribir la hora?
+static Result g_nifmRc      = 1;
+static bool   g_nifmCanToggle = false; // ¿tenemos nifm:a/nifm:s para tocar el WiFi?
+
+// Global débil de libnx que decide a qué servicio conecta timeInitialize().
+extern "C" TimeServiceType __nx_time_service_type;
+
 // --------------------------------------------------------------------------
 // Utilidades de direcciones Bluetooth
 // --------------------------------------------------------------------------
@@ -333,6 +342,200 @@ public:
 };
 
 // ==========================================================================
+//  Pantalla: Hora y fecha
+// ==========================================================================
+class TimeGui : public tsl::Gui {
+    enum { F_YEAR = 0, F_MONTH, F_DAY, F_HOUR, F_MIN, F_COUNT };
+
+    TimeCalendarTime    m_cal{};
+    tsl::elm::ListItem *m_fields[F_COUNT] = { nullptr };
+    tsl::elm::ListItem *m_applyItem       = nullptr;
+
+    static int daysInMonth(int y, int m) {
+        static const int d[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+        if (m < 1 || m > 12) return 31;
+        if (m == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)) return 29;
+        return d[m - 1];
+    }
+
+    // Ajuste circular dentro de [lo, hi] (ambos inclusive).
+    static int wrap(int v, int lo, int hi) {
+        int n = hi - lo + 1;
+        while (v < lo) v += n;
+        while (v > hi) v -= n;
+        return v;
+    }
+
+    void refresh() {
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "%04d", m_cal.year);   m_fields[F_YEAR]->setValue(buf);
+        std::snprintf(buf, sizeof(buf), "%02d", m_cal.month);  m_fields[F_MONTH]->setValue(buf);
+        std::snprintf(buf, sizeof(buf), "%02d", m_cal.day);    m_fields[F_DAY]->setValue(buf);
+        std::snprintf(buf, sizeof(buf), "%02d", m_cal.hour);   m_fields[F_HOUR]->setValue(buf);
+        std::snprintf(buf, sizeof(buf), "%02d", m_cal.minute); m_fields[F_MIN]->setValue(buf);
+    }
+
+    void adjust(int field, int delta) {
+        switch (field) {
+            case F_YEAR:  m_cal.year   = wrap(m_cal.year   + delta, 2000, 2099); break;
+            case F_MONTH: m_cal.month  = wrap(m_cal.month  + delta, 1, 12);      break;
+            case F_DAY:   m_cal.day    = wrap(m_cal.day    + delta, 1,
+                                              daysInMonth(m_cal.year, m_cal.month)); break;
+            case F_HOUR:  m_cal.hour   = wrap(m_cal.hour   + delta, 0, 23);      break;
+            case F_MIN:   m_cal.minute = wrap(m_cal.minute + delta, 0, 59);      break;
+        }
+        int md = daysInMonth(m_cal.year, m_cal.month);   // reajusta el día si cambió el mes/año
+        if (m_cal.day > md) m_cal.day = md;
+        m_cal.second = 0;
+        refresh();
+    }
+
+    void apply() {
+        if (!g_timeCanSet) {
+            m_applyItem->setValue(L("Sin permiso", "No permission"));
+            return;
+        }
+        m_cal.second = 0;
+        u64 ts = 0;
+        s32 cnt = 0;
+        if (R_FAILED(timeToPosixTimeWithMyRule(&m_cal, &ts, 1, &cnt)) || cnt < 1) {
+            m_applyItem->setValue(L("Error", "Error"));
+            return;
+        }
+        Result r1 = timeSetCurrentTime(TimeType_NetworkSystemClock, ts);
+        Result r2 = timeSetCurrentTime(TimeType_UserSystemClock, ts);
+        m_applyItem->setValue((R_SUCCEEDED(r1) || R_SUCCEEDED(r2))
+                                  ? L("Guardado", "Saved") : L("Error", "Error"));
+    }
+
+public:
+    virtual tsl::elm::Element *createUI() override {
+        auto *frame = new tsl::elm::OverlayFrame("Express Config", L("Hora y fecha", "Time & date"));
+        auto *list  = new tsl::elm::List();
+
+        if (R_FAILED(g_timeRc)) {
+            list->addItem(new tsl::elm::CategoryHeader(L("No disponible", "Not available")));
+            list->addItem(new tsl::elm::ListItem(
+                L("No se pudo abrir el servicio time", "Could not open time service")));
+            frame->setContent(list);
+            return frame;
+        }
+
+        // Lee la hora actual (reloj de red; si falla, el de usuario).
+        u64 ts = 0;
+        if (R_FAILED(timeGetCurrentTime(TimeType_NetworkSystemClock, &ts)))
+            timeGetCurrentTime(TimeType_UserSystemClock, &ts);
+        TimeCalendarAdditionalInfo info;
+        if (R_FAILED(timeToCalendarTimeWithMyRule(ts, &m_cal, &info)))
+            m_cal = { 2024, 1, 1, 0, 0, 0, 0 };
+
+        list->addItem(new tsl::elm::CategoryHeader(
+            L("Ajusta con Izquierda / Derecha", "Adjust with Left / Right")));
+
+        static const char *labelsEs[F_COUNT] = { "Año", "Mes", "Día", "Hora", "Minuto" };
+        static const char *labelsEn[F_COUNT] = { "Year", "Month", "Day", "Hour", "Minute" };
+        for (int i = 0; i < F_COUNT; i++) {
+            auto *item = new tsl::elm::ListItem(L(labelsEs[i], labelsEn[i]));
+            item->setClickListener([this, i](u64 keys) {
+                if (keys & HidNpadButton_AnyLeft)  { adjust(i, -1); return true; }
+                if (keys & HidNpadButton_AnyRight) { adjust(i, +1); return true; }
+                return false;   // deja que Arriba/Abajo naveguen entre campos
+            });
+            m_fields[i] = item;
+            list->addItem(item);
+        }
+        refresh();
+
+        list->addItem(new tsl::elm::CategoryHeader(L("Aplicar", "Apply")));
+        m_applyItem = new tsl::elm::ListItem(
+            g_timeCanSet ? L("Guardar hora y fecha", "Save time & date")
+                         : L("Guardar (sin permiso)", "Save (no permission)"));
+        m_applyItem->setClickListener([this](u64 keys) {
+            if (keys & HidNpadButton_A) { apply(); return true; }
+            return false;
+        });
+        list->addItem(m_applyItem);
+
+        frame->setContent(list);
+        return frame;
+    }
+};
+
+// ==========================================================================
+//  Pantalla: WiFi
+// ==========================================================================
+class WifiGui : public tsl::Gui {
+    tsl::elm::ListItem *m_network = nullptr;
+    tsl::elm::ListItem *m_status  = nullptr;
+    u32 m_tick = 0;
+
+public:
+    virtual tsl::elm::Element *createUI() override {
+        auto *frame = new tsl::elm::OverlayFrame("Express Config", "WiFi");
+        auto *list  = new tsl::elm::List();
+
+        if (R_FAILED(g_nifmRc)) {
+            list->addItem(new tsl::elm::CategoryHeader(L("No disponible", "Not available")));
+            list->addItem(new tsl::elm::ListItem(
+                L("No se pudo abrir el servicio nifm", "Could not open nifm service")));
+            frame->setContent(list);
+            return frame;
+        }
+
+        // ---- Interruptor de comunicación inalámbrica ----
+        bool wireless = false;
+        nifmIsWirelessCommunicationEnabled(&wireless);
+        auto *toggle = new tsl::elm::ToggleListItem(L("WiFi / inalámbrico", "WiFi / wireless"), wireless);
+        toggle->setStateChangedListener([](bool state) {
+            if (g_nifmCanToggle)
+                nifmSetWirelessCommunicationEnabled(state);
+        });
+        list->addItem(new tsl::elm::CategoryHeader("Radio"));
+        list->addItem(toggle);
+        if (!g_nifmCanToggle)
+            list->addItem(new tsl::elm::ListItem(
+                L("Solo lectura (sin permiso)", "Read-only (no permission)")));
+
+        // ---- Estado de la conexión ----
+        list->addItem(new tsl::elm::CategoryHeader(L("Estado", "Status")));
+        m_network = new tsl::elm::ListItem(L("Red", "Network"), "-");
+        m_status  = new tsl::elm::ListItem(L("Conexión", "Connection"), "-");
+        list->addItem(m_network);
+        list->addItem(m_status);
+
+        frame->setContent(list);
+        return frame;
+    }
+
+    virtual void update() override {
+        if (R_FAILED(g_nifmRc) || m_status == nullptr) return;
+        if ((m_tick++ % 60) != 0) return;   // refresca ~1 vez por segundo
+
+        // Nombre de la red actual
+        NifmNetworkProfileData prof;
+        if (R_SUCCEEDED(nifmGetCurrentNetworkProfile(&prof)) && prof.network_name[0] != '\0')
+            m_network->setValue(std::string(prof.network_name));
+        else
+            m_network->setValue(L("(ninguna)", "(none)"));
+
+        // Estado de internet + intensidad de señal (0-3 barras)
+        NifmInternetConnectionType type;
+        u32 strength = 0;
+        NifmInternetConnectionStatus st;
+        if (R_SUCCEEDED(nifmGetInternetConnectionStatus(&type, &strength, &st))) {
+            if (strength > 3) strength = 3;
+            std::string s = (st == NifmInternetConnectionStatus_Connected)
+                                ? L("Conectado", "Connected")
+                                : L("Conectando...", "Connecting...");
+            s += "  " + std::string(strength, '|');
+            m_status->setValue(s);
+        } else {
+            m_status->setValue(L("Sin conexión", "No connection"));
+        }
+    }
+};
+
+// ==========================================================================
 //  Pantalla principal (menú)
 // ==========================================================================
 class MainGui : public tsl::Gui {
@@ -357,6 +560,20 @@ public:
         });
         list->addItem(bluetooth);
 
+        auto *wifi = new tsl::elm::ListItem("WiFi", "");
+        wifi->setClickListener([](u64 keys) {
+            if (keys & HidNpadButton_A) { tsl::changeTo<WifiGui>(); return true; }
+            return false;
+        });
+        list->addItem(wifi);
+
+        auto *datetime = new tsl::elm::ListItem(L("Hora y fecha", "Time & date"), "");
+        datetime->setClickListener([](u64 keys) {
+            if (keys & HidNpadButton_A) { tsl::changeTo<TimeGui>(); return true; }
+            return false;
+        });
+        list->addItem(datetime);
+
         frame->setContent(list);
         return frame;
     }
@@ -373,6 +590,27 @@ public:
         g_lblRc = lblInitialize();
         g_btmRc = btmsysInitialize();
 
+        // Hora: intenta time:s (permite escribir); si no, cae a time:u (solo leer).
+        __nx_time_service_type = TimeServiceType_System;
+        g_timeRc = timeInitialize();
+        g_timeCanSet = R_SUCCEEDED(g_timeRc);
+        if (R_FAILED(g_timeRc)) {
+            __nx_time_service_type = TimeServiceType_User;
+            g_timeRc = timeInitialize();
+        }
+
+        // WiFi: intenta nifm:a (control total); si no, nifm:s; si no, nifm:u (solo leer).
+        g_nifmRc = nifmInitialize(NifmServiceType_Admin);
+        if (R_SUCCEEDED(g_nifmRc)) {
+            g_nifmCanToggle = true;
+        } else {
+            g_nifmRc = nifmInitialize(NifmServiceType_System);
+            if (R_SUCCEEDED(g_nifmRc))
+                g_nifmCanToggle = true;
+            else
+                g_nifmRc = nifmInitialize(NifmServiceType_User);
+        }
+
         // Detecta el idioma del sistema una sola vez al arrancar.
         if (R_SUCCEEDED(setInitialize())) {
             u64 code = 0;
@@ -385,8 +623,10 @@ public:
     }
 
     virtual void exitServices() override {
-        if (R_SUCCEEDED(g_btmRc)) btmsysExit();
-        if (R_SUCCEEDED(g_lblRc)) lblExit();
+        if (R_SUCCEEDED(g_nifmRc)) nifmExit();
+        if (R_SUCCEEDED(g_timeRc)) timeExit();
+        if (R_SUCCEEDED(g_btmRc))  btmsysExit();
+        if (R_SUCCEEDED(g_lblRc))  lblExit();
     }
 
     virtual std::unique_ptr<tsl::Gui> loadInitialGui() override {
